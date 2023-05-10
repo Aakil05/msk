@@ -1,3 +1,6 @@
+# use data source to get all avalablility zones in region
+data "aws_availability_zones" "available_zones" {}
+
 #create vpc for msk cluster
 resource "aws_vpc" "msk_cluster_vpc" {
   cidr_block             = var.cidr_block
@@ -25,10 +28,12 @@ resource "aws_security_group" "msk_securitygroups" {
 resource "aws_subnet" "kafka_subnet_1" {
     vpc_id          = aws_vpc.msk_cluster_vpc.id
     cidr_block      = var.kafka_subnet_1_cidr
+    availability_zone       = data.aws_availability_zones.available_zones.names[0]
 }
 resource "aws_subnet" "kafka_subnet_2" {
     vpc_id          = aws_vpc.msk_cluster_vpc.id
     cidr_block      = var.kafka_subnet_2_cidr
+    availability_zone       = data.aws_availability_zones.available_zones.names[1]
 }
 
 
