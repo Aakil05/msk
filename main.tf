@@ -1,61 +1,68 @@
-# use data source to get all avalablility zones in region
-data "aws_availability_zones" "available_zones" {}
-
-#create vpc for msk cluster
-resource "aws_vpc" "msk_cluster_vpc" {
-  cidr_block             = var.cidr_block
-  enable_dns_hostnames   = true
+#provisioning provider aws
+provider "aws" {
+  region     = var.region
+  access_key = var.access_key
+  secret_key = var.secret_key
 }
-#create SG for msk cluster
-resource "aws_security_group" "msk_securitygroups" {
-  name              = "msk_security_group"
-  vpc_id            =  aws_vpc.msk_cluster_vpc.id
-
-  ingress  {
-    cidr_blocks     = var.msk_security_group_cidr_blocks
-    from_port       = 9092
-    to_port         = 9092
-    protocol        = "tcp"
-  }
-  egress  {
-    cidr_blocks     = var.msk_security_group_cidr_blocks
-    from_port       = 0
-    to_port         = 0
-    protocol        = "-1"
+#existing eks cluster
+data "aws_eks_cluster" "example" {
+  name = var.eks_cluster_name
+}
+#vpc and subnets of the eks cluster
+data "aws_vpc" "vpc_name" {
+  id = data.aws_eks_cluster.example.vpc_config[0].vpc_id
+}
+data "aws_subnets" "eks_subnets" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.vpc_name.id]
   }
 }
-#create subnets 1 & 2 for msk cluster
-resource "aws_subnet" "kafka_subnet_1" {
-    vpc_id          = aws_vpc.msk_cluster_vpc.id
-    cidr_block      = var.kafka_subnet_1_cidr
-    availability_zone       = data.aws_availability_zones.available_zones.names[0]
+data "aws_subnet" "eks_subnets_data" {
+  count    = 2
+  id       = element(tolist(data.aws_subnets.eks_subnets.ids), count.index)
+  depends_on = [data.aws_subnets.eks_subnets]
 }
-resource "aws_subnet" "kafka_subnet_2" {
-    vpc_id          = aws_vpc.msk_cluster_vpc.id
-    cidr_block      = var.kafka_subnet_2_cidr
-    availability_zone       = data.aws_availability_zones.available_zones.names[1]
+#Security Group for MSK cluster
+resource "aws_security_group" "example" {
+  name = join("-", [var.cluster_name, "sg"])
+  vpc_id = data.aws_vpc.vpc_name.id
+   ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = {
+    Name = "msk_serverless-sg"
+  }
 }
-
-
-#create aws MSK serverless cluster 
+#MSK Serverless cluster 
 resource "aws_msk_serverless_cluster" "kafka_msk" {
   cluster_name        =   var.cluster_name
   tags = {
-    kafka   =   "serverless"
+   eks_cluster = data.aws_eks_cluster.example.name
   }
   vpc_config {
-    subnet_ids         =   [aws_subnet.kafka_subnet_1.id,aws_subnet.kafka_subnet_2.id] 
-    security_group_ids =   [aws_security_group.msk_securitygroups.id]
+    #subnet_ids =  values(data.aws_subnet.eks_subnets_data)[*].id
+    subnet_ids = [data.aws_subnet.eks_subnets_data[0].id,data.aws_subnet.eks_subnets_data[1].id]
+    security_group_ids =   [aws_security_group.example.id]
   }
   client_authentication {
     sasl {
       iam {
-        enabled   =   var.iam_enabled
+        enabled   =   true
       }
     }
   }
 }
-
 #create iam policy like msk_access
 #iam policy 
 resource "aws_iam_policy" "policies" {
@@ -63,7 +70,7 @@ resource "aws_iam_policy" "policies" {
   policy         = jsonencode({
     Version      = "2012-10-17"
     Statement    = [
-      {
+     {
         Effect   = "Allow"
         Action   = [
             "kafka-cluster:*Topic*",
@@ -75,7 +82,7 @@ resource "aws_iam_policy" "policies" {
             "kafka-cluster:Connect",
             "kafka-cluster:WriteData"
         ]
-        Resource = var.iam_policy_resources
+        Resource = "*"
       },
     ]
   })
@@ -83,38 +90,23 @@ resource "aws_iam_policy" "policies" {
       Service    = "kafka"
     }
 }
-
-#create iam role
-#resource "aws_iam_role" "msk_serverless_cluster_role" {
-#  name               = "mskserverlessrole"
-#  assume_role_policy = jsonencode({
-#    Version          = "2012-10-17"
-#    Statement        = [
-#      {
-#        Action       = "sts:AssumeRole"
-#        Effect       = "Allow"
-#        Principal    = {
-#          Service    = var.iam_role_ec2_service
-#        }
-#      },
-#      {
-#        Action       = "sts:AssumeRole"
-#        Effect       = "Allow"
-#        Principal    = {
-#          Service    = var.iam_role_eks_service
-#        }
-#      }
-#    ]
-#  })
-#}
-
-#data block to retrive existing role
-data "aws_iam_role" "my_role" {
-  name = "AvonTest-eks-node-group"
+#Node group of eks cluster
+data "aws_eks_node_groups" "example" {
+  cluster_name = data.aws_eks_cluster.example.name
 }
-
-#attaching iam roles to the policy
- resource "aws_iam_role_policy_attachment" "role_policy_attachment" {
- policy_arn     = aws_iam_policy.policies.arn
- role           = data.aws_iam_role.my_role.name
+data "aws_eks_node_group" "example" {
+  for_each = data.aws_eks_node_groups.example.names
+  cluster_name    = data.aws_eks_cluster.example.name
+  node_group_name = each.value
+}
+#IAM role of the Node group
+data "aws_iam_role" "my_role" {
+  for_each = data.aws_eks_node_group.example
+  name     = split("/", each.value.node_role_arn)[1]
+}
+#IAM Role Policy attachment
+resource "aws_iam_role_policy_attachment" "policy_attachment" {
+  for_each    = data.aws_iam_role.my_role
+  role        = each.value.name
+  policy_arn  = aws_iam_policy.policies.arn
 }
